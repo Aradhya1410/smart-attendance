@@ -197,6 +197,51 @@ async def google_login(request: Request):
 @router.get("/google/callback")
 async def google_callback(request: Request):
     token = await oauth.google.authorize_access_token(request)
+
+    resp = await oauth.google.get(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        token=token
+    )
+    google_user = resp.json()
+
+    email = google_user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Unable to read email from Google account")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="No account associated with this Google email. Please sign up first."
+        )
+
+    if not user.get("is_verified", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before logging in."
+        )
+
+    # ✅ CREATE JWT (MATCH NORMAL LOGIN)
+    jwt_token = create_jwt(
+        user_id=str(user["_id"]),
+        role=user["role"],
+        email=user["email"]
+    )
+
+    FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+
+    redirect_url = (
+        f"{FRONTEND_BASE_URL}/oauth-callback"
+        f"#token={quote(jwt_token)}"
+        f"&userId={quote(str(user['_id']))}"
+        f"&email={quote(user['email'])}"
+        f"&role={quote(user['role'])}"
+        f"&name={quote(user['name'])}"
+    )
+
+    return RedirectResponse(url=redirect_url)
+
+    token = await oauth.google.authorize_access_token(request)
     
     # Fetch user profile from Google userinfo
     resp = await oauth.google.get("https://www.googleapis.com/oauth2/v3/userinfo",token=token)
@@ -211,10 +256,14 @@ async def google_callback(request: Request):
     if not user:
         raise HTTPException(status_code=400, detail="No account associated with this Google email. Please sign up first.")
     
+    # Check if user is verified or not
+    if not user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email first..")
+    
     # Create jwt token
     user_id = str(user["_id"])
     role = user["role"]
-    jwt_token = create_jwt(user_id, role)
+    jwt_token = create_jwt(user_id, role, email)
     
     # Build redirect url for frontend
     FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
